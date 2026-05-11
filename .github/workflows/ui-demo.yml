@@ -100,8 +100,8 @@ jobs:
         run: |
           SCENARIOS=$(cd ui && node e2e/resolve-scenarios.mjs)
           echo "Resolved: $SCENARIOS"
-          # Write to a file so later steps read it directly, avoiding
-          # ${{ }} expression substitution which mangles non-ASCII chars.
+          # Write to a file so later steps read it directly — expression
+          # substitution in run blocks mangles non-ASCII chars (em-dashes).
           echo "$SCENARIOS" > /tmp/scenarios.json
 
       # ── Install ffmpeg ───────────────────────────────────────────────────
