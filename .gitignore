@@ -32,6 +32,7 @@ ui/node_modules/
 ui/.react-router/
 ui/build/
 ui/playwright-report/
+ui/playwright-report-demo/
 ui/test-results/
 
 # Task cache

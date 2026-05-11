@@ -1,0 +1,200 @@
+name: UI Demo Recording
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'ui/**'
+      - 'config/components/ui/**'
+      - '.github/workflows/ui-demo.yml'
+
+# Allow writing to the recordings branch and posting PR comments.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  record:
+    name: Record UI Demo
+    runs-on: ubuntu-latest
+    env:
+      TASK_X_REMOTE_TASKFILES: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Node / pnpm ──────────────────────────────────────────────────────
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browser
+        working-directory: ui
+        run: pnpm exec playwright install chromium --with-deps
+
+      # ── Go / cluster tooling ─────────────────────────────────────────────
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '~1.24.0'
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Cluster + backend ────────────────────────────────────────────────
+      - name: Spin up kind cluster
+        run: task --yes test-infra:cluster-up
+
+      - name: Build backend image
+        run: task dev:build
+
+      - name: Load backend image into kind
+        run: task dev:load
+
+      - name: Deploy backend (e2e overlay)
+        env:
+          KUBECONFIG: .test-infra/kubeconfig
+        run: |
+          task --yes test-infra:kubectl -- apply -k config/overlays/e2e
+          task --yes test-infra:kubectl -- wait \
+            --for=condition=available \
+            deployment/services-controller-manager \
+            -n services-system \
+            --timeout=120s
+
+      - name: Wait for webhook certificate
+        env:
+          KUBECONFIG: .test-infra/kubeconfig
+        run: |
+          task --yes test-infra:kubectl -- wait \
+            --for=condition=ready \
+            certificate/services-serving-cert \
+            -n services-system \
+            --timeout=120s
+
+      - name: Seed demo data
+        env:
+          KUBECONFIG: .test-infra/kubeconfig
+        run: task --yes test-infra:kubectl -- apply -f hack/seed-dev.yaml
+
+      # ── Record ───────────────────────────────────────────────────────────
+      - name: Run demo recording
+        working-directory: ui
+        # continue-on-error so we still post the comment / upload artifact
+        # even when the recording itself hits a flaky screen.
+        continue-on-error: true
+        run: pnpm exec playwright test --config playwright.demo.config.ts
+
+      # ── Convert webm → gif ───────────────────────────────────────────────
+      - name: Convert recording to GIF
+        id: convert
+        run: |
+          VIDEO=$(find ui/test-results -name "*.webm" | head -1)
+          if [ -z "$VIDEO" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No .webm recording found — skipping conversion."
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+          # Two-pass palette GIF: good colour fidelity at a manageable size.
+          ffmpeg -i "$VIDEO" \
+            -vf "fps=8,scale=1280:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" \
+            -loop 0 \
+            ui/test-results/demo.gif
+
+          echo "GIF size: $(du -sh ui/test-results/demo.gif | cut -f1)"
+
+      # ── Upload artifact (fallback download link) ─────────────────────────
+      - name: Upload GIF artifact
+        if: steps.convert.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-demo-pr-${{ github.event.pull_request.number }}
+          path: ui/test-results/demo.gif
+          retention-days: 30
+
+      # ── Push GIF to ui-recordings branch ────────────────────────────────
+      - name: Push GIF to ui-recordings branch
+        if: steps.convert.outputs.found == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          PR=${{ github.event.pull_request.number }}
+          GIF=$(realpath ui/test-results/demo.gif)
+
+          # Add the recordings branch as a worktree so we don't disturb the
+          # main checkout. Create an orphan branch on first run.
+          if git ls-remote --exit-code origin ui-recordings > /dev/null 2>&1; then
+            git fetch origin ui-recordings
+            git worktree add /tmp/recordings origin/ui-recordings
+          else
+            git worktree add --orphan -b ui-recordings /tmp/recordings
+            # Bootstrap: add a .gitkeep so the first commit isn't empty.
+            touch /tmp/recordings/.gitkeep
+            (cd /tmp/recordings && git add .gitkeep && \
+              git commit -m "chore: initialise ui-recordings branch")
+          fi
+
+          mkdir -p "/tmp/recordings/pr-${PR}"
+          cp "$GIF" "/tmp/recordings/pr-${PR}/demo.gif"
+
+          cd /tmp/recordings
+          git add "pr-${PR}/demo.gif"
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "recording: PR #${PR} (run ${{ github.run_id }})"
+          git push origin ui-recordings
+
+      # ── Post or update PR comment ────────────────────────────────────────
+      - name: Find existing demo comment
+        id: find-comment
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '<!-- ui-demo-recording -->'
+
+      - name: Post or update demo comment (recording found)
+        if: steps.convert.outputs.found == 'true'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          edit-mode: replace
+          body: |
+            <!-- ui-demo-recording -->
+            ## 🎬 UI Demo
+
+            ![Service Catalog Demo](https://raw.githubusercontent.com/${{ github.repository }}/ui-recordings/pr-${{ github.event.pull_request.number }}/demo.gif)
+
+            > Recorded from ${{ github.sha }} · [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: Post or update demo comment (recording missing)
+        if: steps.convert.outputs.found == 'false'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          edit-mode: replace
+          body: |
+            <!-- ui-demo-recording -->
+            ## 🎬 UI Demo
+
+            > ⚠️ Recording not captured for this run. Check the [workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
