@@ -97,8 +97,6 @@ jobs:
       # ── Resolve scenarios ────────────────────────────────────────────────
       - name: Resolve scenarios
         id: scenarios
-        env:
-          GITHUB_BASE_REF: ${{ github.base_ref }}
         run: |
           SCENARIOS=$(cd ui && node e2e/resolve-scenarios.mjs)
           echo "Resolved: $SCENARIOS"
