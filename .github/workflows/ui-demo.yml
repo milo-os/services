@@ -113,11 +113,12 @@ jobs:
         run: |
           mkdir -p /tmp/recordings-out
 
-          # Write scenario lines to a file so subprocess stdin doesn't
-          # steal bytes from the while-loop's pipe on each playwright run.
-          jq -c '.[]' /tmp/scenarios.json > /tmp/scenario-lines.txt
+          # Load all scenario lines into a bash array up front so no open
+          # file descriptor exists during playwright runs (which would be
+          # inherited by pnpm/node subprocesses and corrupt later reads).
+          mapfile -t SCENARIO_LINES < <(jq -c '.[]' /tmp/scenarios.json)
 
-          while IFS= read -r scenario; do
+          for scenario in "${SCENARIO_LINES[@]}"; do
             NAME=$(echo "$scenario" | jq -r '.name')
             SPEC=$(echo "$scenario" | jq -r '.spec')
 
@@ -139,7 +140,7 @@ jobs:
             if [ -f "/tmp/recordings-out/${NAME}.gif" ]; then
               echo "Converted $NAME: $(du -sh /tmp/recordings-out/${NAME}.gif | cut -f1)"
             fi
-          done < /tmp/scenario-lines.txt
+          done
 
       # ── Check whether any GIFs were produced ────────────────────────────
       - name: Check recordings
