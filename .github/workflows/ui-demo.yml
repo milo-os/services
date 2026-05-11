@@ -187,7 +187,7 @@ jobs:
           git add "pr-${PR}/"
           git diff --cached --quiet && echo "No changes to push" && exit 0
           git commit -m "recording: PR #${PR} (run ${{ github.run_id }})"
-          git push origin ui-recordings
+          git push origin HEAD:ui-recordings
 
       # ── Build PR comment body ─────────────────────────────────────────────
       - name: Build comment body
