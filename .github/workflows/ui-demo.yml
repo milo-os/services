@@ -102,6 +102,9 @@ jobs:
         run: pnpm exec playwright test --config playwright.demo.config.ts
 
       # ── Convert webm → gif ───────────────────────────────────────────────
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
       - name: Convert recording to GIF
         id: convert
         run: |
